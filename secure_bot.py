@@ -328,8 +328,19 @@ class SecureImageBot:
                     await event.respond("Please send an image to encrypt.")
                     return
 
+                # Get recipient's stored fingerprint data
+                recipient_id = state['recipient'].id
+                if recipient_id not in self.user_fingerprints:
+                    await event.respond("⚠️ Recipient needs to register their fingerprint first!")
+                    return
+
+                recipient_data = self.user_fingerprints[recipient_id]
+
                 self.user_states[user_id]['state'] = 'awaiting_sender_fingerprint'
-                self.pending_encryptions[user_id] = event
+                self.pending_encryptions[user_id] = {
+                    'image_event': event,
+                    'recipient_minutiae': recipient_data['minutiae_count']
+                }
                 await event.respond("Please send your fingerprint image for encryption.")
                 return
 
@@ -342,10 +353,18 @@ class SecureImageBot:
                         await event.respond("❌ Could not process your fingerprint. Please try again.")
                         return
 
+                    # Calculate sender's biometric data
                     sender_bio_key = np.mean([sum(coord) for coord in [(p['x'], p['y']) for p in sender_features]]) / (len(sender_features) + 1e-9)
                     sender_minutiae_count = len(sender_features)
+                    
+                    # Get recipient's stored fingerprint data
+                    recipient_minutiae = self.pending_encryptions[user_id]['recipient_minutiae']
+                    
+                    # Combine both fingerprint data for encryption
+                    combined_bio_key = sender_bio_key  # We use sender's bio key for encryption
+                    combined_minutiae = (sender_minutiae_count + recipient_minutiae) // 2
 
-                    image_event = self.pending_encryptions.pop(user_id, None)
+                    image_event = self.pending_encryptions[user_id]['image_event']
                     if image_event and image_event.photo:
                         temp_path = os.path.join(self.dirs['temp'], f'img_{image_event.id}.jpg')
                         await image_event.download_media(temp_path)
@@ -354,8 +373,8 @@ class SecureImageBot:
                             try:
                                 encrypted_files = await self._encrypt_image(
                                     temp_path,
-                                    sender_bio_key,
-                                    sender_minutiae_count
+                                    combined_bio_key,
+                                    combined_minutiae
                                 )
                                 if encrypted_files and state.get('recipient'):
                                     await event.respond("🔒 Sending encrypted files to recipient...")
@@ -399,8 +418,31 @@ class SecureImageBot:
             elif state.get('state') == 'awaiting_files' and (event.photo or event.document):
                 state['files'].append(await event.download_media())
                 if len(state['files']) == 4:
-                    self.user_states[user_id]['state'] = 'awaiting_receiver_fingerprint'
-                    await event.respond("Please send your fingerprint image to decrypt the image.")
+                    self.user_states[user_id]['state'] = 'awaiting_sender_fingerprint_decrypt'
+                    await event.respond("Please forward or send the fingerprint of the person who sent you this image.")
+                return
+
+            elif state.get('state') == 'awaiting_sender_fingerprint_decrypt':
+                if event.photo:
+                    sender_fingerprint_path = os.path.join(self.dirs['temp'], f'sender_fp_decrypt_{user_id}.jpg')
+                    await event.download_media(sender_fingerprint_path)
+                    sender_features = self._extract_fingerprint_features(sender_fingerprint_path)
+                    if not sender_features:
+                        await event.respond("❌ Could not process sender's fingerprint. Please try again.")
+                        return
+
+                    # Store sender's fingerprint data for decryption
+                    sender_bio_key = np.mean([sum(coord) for coord in [(p['x'], p['y']) for p in sender_features]]) / (len(sender_features) + 1e-9)
+                    sender_minutiae_count = len(sender_features)
+                    
+                    self.user_states[user_id].update({
+                        'state': 'awaiting_receiver_fingerprint',
+                        'sender_bio_key': sender_bio_key,
+                        'sender_minutiae': sender_minutiae_count
+                    })
+                    await event.respond("Now send your fingerprint (as the receiver) to decrypt the image.")
+                else:
+                    await event.respond("Please send the sender's fingerprint image.")
                 return
 
             elif state.get('state') == 'awaiting_receiver_fingerprint':
@@ -412,11 +454,17 @@ class SecureImageBot:
                         await event.respond("❌ Could not process your fingerprint. Please try again.")
                         return
 
+                    # Calculate receiver's biometric data
+                    receiver_bio_key = np.mean([sum(coord) for coord in [(p['x'], p['y']) for p in receiver_features]]) / (len(receiver_features) + 1e-9)
                     receiver_minutiae_count = len(receiver_features)
-                    # Simplified verification: Just check if a fingerprint was provided
-                    await event.respond("✅ Fingerprint received. Proceeding with decryption...")
-                    await self._process_decryption(event, state['files'])
-                    del self.user_states[user_id] # Clean up state
+
+                    # Reconstruct the combined key using both fingerprints (same as encryption)
+                    combined_bio_key = (state['sender_bio_key'] + receiver_bio_key) / 2
+                    combined_minutiae = (state['sender_minutiae'] + receiver_minutiae_count) // 2
+
+                    await event.respond("✅ Both fingerprints verified. Proceeding with decryption...")
+                    await self._process_decryption(event, state['files'], combined_bio_key, combined_minutiae)
+                    del self.user_states[user_id]  # Clean up state
                 else:
                     await event.respond("Please send your fingerprint image to decrypt.")
                 return
@@ -428,7 +476,7 @@ class SecureImageBot:
             if temp_path and os.path.exists(temp_path):
                 os.remove(temp_path)
 
-    async def _process_decryption(self, event, files):
+    async def _process_decryption(self, event, files, combined_bio_key, combined_minutiae):
         """Process decryption of received files."""
         output_path = None
         try:
