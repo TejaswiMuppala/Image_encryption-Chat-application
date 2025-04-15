@@ -237,6 +237,8 @@ def main():
         np.save(f, permutation)
     with open("minutiae_count.txt", "w") as f: # Save minutiae count
         f.write(str(num_minutiae))
+    with open("biometric_key.txt", "w") as f: # Save biometric key 
+        f.write(str(biometric_key))
 
     print("[SUCCESS] Image Encrypted and Saved!")
 
@@ -246,6 +248,7 @@ def main():
     encrypted_key_path = "encrypted_aes_key.bin"
     permutation_path = "scramble_permutation.bin"
     minutiae_count_path = "minutiae_count.txt"
+    biometric_key_path = "biometric_key.txt"
     fingerprint_path_decrypt = input("Enter path to your fingerprint image for decryption: ").strip()
 
     try:
@@ -256,6 +259,8 @@ def main():
         permutation_loaded = np.load(permutation_path)
         with open(minutiae_count_path, "r") as f:
             num_minutiae_encrypted = int(f.read())
+        with open(biometric_key_path, "r") as f:
+            biometric_key_encrypted = float(f.read())
 
         print("[INFO] Extracting fingerprint features for decryption...")
         minutiae_decrypt = extract_fingerprint_features_cn(fingerprint_path_decrypt)
@@ -275,9 +280,10 @@ def main():
         print(f"[INFO] Raw Biometric key (decryption): {biometric_key_raw_decrypt}")
         print(f"[INFO] Normalized Biometric key (decryption): {biometric_key_decrypt}")
         print(f"[INFO] Number of minutiae (encrypted): {num_minutiae_encrypted}")
+        print(f"[INFO] Stored Biometric key: {biometric_key_encrypted}")
 
-        # **CRITICAL: Check if the number of minutiae matches.**
-        if num_minutiae_encrypted != num_minutiae_decrypt:
+        # Check if fingerprint features match
+        if abs(biometric_key_decrypt - biometric_key_encrypted) > 0.01:
             print("[ERROR] Fingerprints do not match. Decryption failed.")
             return
 
